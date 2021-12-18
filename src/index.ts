@@ -1,5 +1,18 @@
 import { NextFunction, Request, Response } from 'express';
 
+export type Handle = (req: Request, res: Response, next: NextFunction) => void;
+export type Authorize = (privilege: string, action?: number) => Handle;
+export type MultiAuthorize<T> = (v: T[], privilege: string, action?: number) => Handle;
+export type Authorizes<T> = (v: T[], privilege: string, action?: number) => Handle;
+export type Check<T> = (v: T[]) => Handle;
+export interface Token {
+  secret: string;
+  expires: number;
+}
+export interface TokenConfig {
+  secret: string;
+  expires: number;
+}
 export interface StatusError {
   status: number;
   body: string;
@@ -37,6 +50,7 @@ export class Handler<P> {
   }
 }
 export const AuthorizationHandler = Handler;
+// tslint:disable-next-line:max-classes-per-file
 export class AuthorizationChecker<P> {
   buildError: (err: any) => StatusError;
   prefix: string;
@@ -48,7 +62,7 @@ export class AuthorizationChecker<P> {
     this.check = this.check.bind(this);
     this.require = this.require.bind(this);
   }
-  require(): (req: Request, res: Response, next: NextFunction) => void {
+  require(): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
       const data = req.headers['authorization'];
       if (data) {
@@ -69,7 +83,7 @@ export class AuthorizationChecker<P> {
       }
     };
   }
-  check(): (req: Request, res: Response, next: NextFunction) => void {
+  check(): Handle {
     return this.require();
   }
 }
@@ -93,6 +107,7 @@ export function exist<T>(obj: T | T[], arr: T[]): boolean {
   }
   return false;
 }
+// tslint:disable-next-line:max-classes-per-file
 export class QuickChecker<T> {
   buildError: (err: any) => StatusError;
   key: string;
@@ -103,7 +118,7 @@ export class QuickChecker<T> {
     this.token = (token ? token : 'token');
     this.check = this.check.bind(this);
   }
-  check(v: T[]): (req: Request, res: Response, next: NextFunction) => void {
+  check(v: T[]): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
       const payload: any = res.locals[this.token];
       if (!payload) {
@@ -123,19 +138,20 @@ export class QuickChecker<T> {
     };
   }
 }
+// tslint:disable-next-line:max-classes-per-file
 export class Checker<T, P> {
   buildError: (err: any) => StatusError;
   key: string;
   prefix: string;
   token: string;
-  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, key?: string, buildErr?: (err: any) => StatusError, prefix?: string, token?: string) {
+  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, buildErr?: (err: any) => StatusError, key?: string, prefix?: string, token?: string) {
     this.buildError = (buildErr ? buildErr : buildError);
     this.prefix = (prefix ? prefix : 'Bearer ');
     this.key = (key ? key : 'userId');
     this.token = (token ? token : 'token');
     this.check = this.check.bind(this);
   }
-  check(v: T[]): (req: Request, res: Response, next: NextFunction) => void {
+  check(v: T[]): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
       const data = req.headers['authorization'];
       if (data) {
@@ -170,6 +186,7 @@ export class Checker<T, P> {
     };
   }
 }
+// tslint:disable-next-line:max-classes-per-file
 export class MultiAuthorizer<T, P> {
   buildError: (err: any) => StatusError;
   user: string;
@@ -177,7 +194,7 @@ export class MultiAuthorizer<T, P> {
   prefix: string;
   exact: boolean;
   token: string;
-  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, public privilege: (userId: string, privilegeId: string) => Promise<number>, key?: string, buildErr?: (err: any) => StatusError, exact?: boolean, user?: string, prefix?: string, token?: string) {
+  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, public privilege: (userId: string, privilegeId: string) => Promise<number>, buildErr?: (err: any) => StatusError, key?: string, exact?: boolean, user?: string, prefix?: string, token?: string) {
     this.buildError = (buildErr ? buildErr : buildError);
     this.prefix = (prefix ? prefix : 'Bearer ');
     this.user = (user ? user : 'userId');
@@ -186,7 +203,7 @@ export class MultiAuthorizer<T, P> {
     this.exact = (exact !== undefined ? exact : true);
     this.authorize = this.authorize.bind(this);
   }
-  authorize(v: T[], privilege: string, action?: number): (req: Request, res: Response, next: NextFunction) => void {
+  authorize(v: T[], privilege: string, action?: number): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
       const data = req.headers['authorization'];
       if (data) {
@@ -253,6 +270,7 @@ export class MultiAuthorizer<T, P> {
     };
   }
 }
+// tslint:disable-next-line:max-classes-per-file
 export class Authorizer<P> {
   buildError: (err: any) => StatusError;
   key: string;
@@ -267,7 +285,7 @@ export class Authorizer<P> {
     this.exact = (exact !== undefined ? exact : true);
     this.authorize = this.authorize.bind(this);
   }
-  authorize(privilege: string, action?: number): (req: Request, res: Response, next: NextFunction) => void {
+  authorize(privilege: string, action?: number): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
       const data = req.headers['authorization'];
       if (data) {
@@ -330,6 +348,7 @@ export const read = 1;
 export const write = 2;
 export const approve = 4;
 export const all = 2147483647;
+// tslint:disable-next-line:max-classes-per-file
 export class PrivilegeLoader {
   constructor(public sql: string, public query: <T>(sql: string, args?: any[]) => Promise<T[]>) {
     this.privilege = this.privilege.bind(this);
