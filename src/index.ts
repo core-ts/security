@@ -1,4 +1,4 @@
-import { NextFunction, Request, Response } from 'express';
+import { Application, NextFunction, Request, Response } from 'express';
 
 export type Handle = (req: Request, res: Response, next: NextFunction) => void;
 export type Authorize = (privilege: string, action?: number) => Handle;
@@ -9,42 +9,168 @@ export interface Token {
   secret: string;
   expires: number;
 }
-export interface TokenConfig {
-  secret: string;
-  expires: number;
-}
+export type TokenConfig = Token;
+export type TokenConf = Token;
 export interface StatusError {
   status: number;
   body: string;
 }
-export class Handler<P> {
+export type GetToken<P> = (req: Request, res: Response) => Promise<PayloadToken<P>>;
+export interface StringToken {
+  token: string;
+  error?: string;
+}
+export interface PayloadToken<P> {
+  payload?: P;
+  token?: string;
+  error?: string;
+  end?: boolean;
+}
+export function handleToken<P>(res: Response, secret: string, name: string, t: StringToken, verify: (token: string, secret: string) => Promise<P>, buildErr: (err: any) => StatusError): Promise<PayloadToken<P>> {
+  if (t.error) {
+    res.status(401).end(t.error);
+    return Promise.resolve({error: t.error, end: true});
+  } else {
+    return verify(t.token, secret).then(payload => {
+      res.locals[name] = payload;
+      return Promise.resolve({payload, token: t.token});
+    }).catch(err => {
+      const { status, body } = buildErr(err);
+      res.status(status).end(body);
+      return Promise.resolve({token: t.token, error: t.error, end: true});
+    });
+  }
+}
+export function fromCookies(req: Request, name: string): StringToken {
+  if (!req.cookies) {
+    return { token: '', error: `Require cookies`};
+  } else {
+    const token = req.cookies[name];
+    if (!token) {
+      return { token: '', error: `Require '${name}' in cookies`};
+    } else {
+      console.log('token cookie ' + token);
+      return { token };
+    }
+  }
+}
+export function fromAuthorization(req: Request, prefix: string): StringToken {
+  const data = req.headers['authorization'];
+    if (data) {
+      if (!data.startsWith(prefix)) {
+        return { token: '', error: `Authorization must start with '${prefix.trim()}'`};
+      } else {
+        const token = data.substr(prefix.length);
+        console.log('Bearer token ' + token);
+        return { token };
+      }
+    } else {
+      return { token: '', error: `Require 'Authorization' in header`};
+    }
+}
+export interface TokenHandler<P> {
+  getToken(req: Request, res: Response): Promise<PayloadToken<P>>;
+}
+export class LocalsToken<P> implements TokenHandler<P> {
+  token: string;
+  constructor(token?: string) {
+    this.token = (token ? token : 'token');
+    this.getToken = this.getToken.bind(this);
+  }
+  getToken(req: Request, res: Response): Promise<PayloadToken<P>> {
+    const payload = res.locals[this.token];
+    return Promise.resolve({ payload });
+  }
+}
+// tslint:disable-next-line:max-classes-per-file
+export class CookiesToken<P> implements TokenHandler<P> {
+  token: string;
+  payload: string;
   buildError: (err: any) => StatusError;
+  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, buildErr?: (err: any) => StatusError, payload?: string, token?: string) {
+    this.token = (token ? token : 'token');
+    this.payload = (payload ? payload : 'token');
+    this.buildError = (buildErr ? buildErr : buildError);
+    this.getToken = this.getToken.bind(this);
+  }
+  getToken(req: Request, res: Response): Promise<PayloadToken<P>> {
+    const t = fromCookies(req, this.token);
+    return handleToken<P>(res, this.secret, this.payload, t, this.verify, this.buildError);
+  }
+}
+// tslint:disable-next-line:max-classes-per-file
+export class AuthorizationToken<P> implements TokenHandler<P> {
+  prefix: string;
+  payload: string;
+  buildError: (err: any) => StatusError;
+  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, buildErr?: (err: any) => StatusError, payload?: string, prefix?: string) {
+    this.prefix = (prefix ? prefix : 'Bearer ');
+    this.payload = (payload ? payload : 'token');
+    this.buildError = (buildErr ? buildErr : buildError);
+    this.getToken = this.getToken.bind(this);
+  }
+  getToken(req: Request, res: Response): Promise<PayloadToken<P>> {
+    const t = fromAuthorization(req, this.prefix);
+    return handleToken<P>(res, this.secret, this.payload, t, this.verify, this.buildError);
+  }
+}
+// tslint:disable-next-line:max-classes-per-file
+export class TokenService<P> implements TokenHandler<P> {
   prefix: string;
   token: string;
-  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, buildErr?: (err: any) => StatusError, prefix?: string, token?: string) {
-    this.buildError = (buildErr ? buildErr : buildError);
+  payload: string;
+  buildError: (err: any) => StatusError;
+  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, buildErr?: (err: any) => StatusError, payload?: string, token?: string, prefix?: string) {
     this.prefix = (prefix ? prefix : 'Bearer ');
     this.token = (token ? token : 'token');
+    this.payload = (payload ? payload : 'token');
+    this.buildError = (buildErr ? buildErr : buildError);
+    this.getToken = this.getToken.bind(this);
+  }
+  getToken(req: Request, res: Response): Promise<PayloadToken<P>> {
+    let t = fromCookies(req, this.token);
+    if (t.error) {
+      t = fromAuthorization(req, this.prefix);
+    }
+    return handleToken<P>(res, this.secret, this.payload, t, this.verify, this.buildError);
+  }
+}
+export function useToken<P>(secret: string, verify: (token: string, secret: string) => Promise<P>, buildErr?: (err: any) => StatusError, cookie?: boolean, payload?: string, token?: string, prefix?: string): GetToken<P> {
+  if (cookie === true) {
+    return new CookiesToken(secret, verify, buildErr, payload, token).getToken;
+  } else if (cookie === false) {
+    return new AuthorizationToken(secret, verify, buildErr, payload, prefix).getToken;
+  } else {
+    return new TokenService(secret, verify, buildErr, payload, token, prefix).getToken;
+  }
+}
+export const getToken = useToken;
+// tslint:disable-next-line:max-classes-per-file
+export class Handler<P> {
+  prefix: string;
+  token: string;
+  payload: string;
+  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, prefix?: string, token?: string, payload?: string) {
+    this.prefix = (prefix ? prefix : 'Bearer ');
+    this.token = (token ? token : 'token');
+    this.payload = (payload ? payload : 'token');
     this.handle = this.handle.bind(this);
   }
   handle(): (req: Request, res: Response, next: NextFunction) => void {
     return (req: Request, res: Response, next: NextFunction) => {
-      const data = req.headers['authorization'];
-      if (data) {
-        if (!data.startsWith(this.prefix)) {
-          res.status(401).end(`Authorization must start with '${this.prefix.trim()}'`);
-        } else {
-          const token = data.substr(this.prefix.length);
-          this.verify(token, this.secret).then(payload => {
-            res.locals[this.token] = payload;
-            next();
-          }).catch(err => {
-            const { status, body } = this.buildError(err);
-            res.status(status).end(body);
-          });
-        }
-      } else {
+      let t = fromCookies(req, this.token);
+      if (t.error) {
+        t = fromAuthorization(req, this.prefix);
+      }
+      if (t.error) {
         next();
+      } else {
+        this.verify(t.token, this.secret).then(payload => {
+          res.locals[this.payload] = payload;
+          next();
+        }).catch(err => {
+          next();
+        });
       }
     };
   }
@@ -52,35 +178,19 @@ export class Handler<P> {
 export const AuthorizationHandler = Handler;
 // tslint:disable-next-line:max-classes-per-file
 export class AuthorizationChecker<P> {
-  buildError: (err: any) => StatusError;
-  prefix: string;
-  token: string;
-  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, buildErr?: (err: any) => StatusError, prefix?: string, token?: string) {
-    this.buildError = (buildErr ? buildErr : buildError);
-    this.prefix = (prefix ? prefix : 'Bearer ');
-    this.token = (token ? token : 'token');
+  getToken: GetToken<P>;
+  constructor(gt: GetToken<P>) {
+    this.getToken = gt;
     this.check = this.check.bind(this);
     this.require = this.require.bind(this);
   }
   require(): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
-      const data = req.headers['authorization'];
-      if (data) {
-        if (!data.startsWith(this.prefix)) {
-          res.status(401).end(`Authorization must start with '${this.prefix.trim()}'`);
-        } else {
-          const token = data.substr(this.prefix.length);
-          this.verify(token, this.secret).then(payload => {
-            res.locals[this.token] = payload;
-            next();
-          }).catch(err => {
-            const { status, body } = this.buildError(err);
-            res.status(status).end(body);
-          });
+      this.getToken(req, res).then(t => {
+        if (!t.end) {
+          next();
         }
-      } else {
-        res.status(401).end(`Require 'Authorization' in header`);
-      }
+      });
     };
   }
   check(): Handle {
@@ -108,238 +218,164 @@ export function exist<T>(obj: T | T[], arr: T[]): boolean {
   return false;
 }
 // tslint:disable-next-line:max-classes-per-file
-export class QuickChecker<T> {
-  buildError: (err: any) => StatusError;
-  key: string;
-  token: string;
-  constructor(key?: string, buildErr?: (err: any) => StatusError, token?: string) {
-    this.buildError = (buildErr ? buildErr : buildError);
-    this.key = (key ? key : 'userId');
-    this.token = (token ? token : 'token');
-    this.check = this.check.bind(this);
-  }
-  check(v: T[]): Handle {
-    return (req: Request, res: Response, next: NextFunction) => {
-      const payload: any = res.locals[this.token];
-      if (!payload) {
-        res.status(401).end('Payload cannot be undefined');
-      } else {
-        const obj = (payload as any)[this.key];
-        if (!obj) {
-          res.status(403).end('Payload must contain ' + this.key);
-        } else {
-          if (exist<T>(obj as any, v)) {
-            next();
-          } else {
-            res.status(403).end('invalid ' + this.key);
-          }
-        }
-      }
-    };
-  }
-}
-// tslint:disable-next-line:max-classes-per-file
 export class Checker<T, P> {
-  buildError: (err: any) => StatusError;
   key: string;
-  prefix: string;
-  token: string;
-  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, buildErr?: (err: any) => StatusError, key?: string, prefix?: string, token?: string) {
-    this.buildError = (buildErr ? buildErr : buildError);
-    this.prefix = (prefix ? prefix : 'Bearer ');
-    this.key = (key ? key : 'userId');
-    this.token = (token ? token : 'token');
+  getToken: GetToken<P>;
+  constructor(gt: GetToken<P>, key?: string) {
+    this.getToken = gt;
+    this.key = (key ? key : 'id');
     this.check = this.check.bind(this);
   }
   check(v: T[]): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
-      const data = req.headers['authorization'];
-      if (data) {
-        if (!data.startsWith(this.prefix)) {
-          res.status(401).end(`Authorization must start with '${this.prefix.trim()}'`);
-        } else {
-          const token = data.substr(this.prefix.length);
-          this.verify(token, this.secret).then(payload => {
-            if (payload === undefined) {
-              res.status(401).end('Payload cannot be undefined');
+      this.getToken(req, res).then(t => {
+        if (!t.end) {
+          if (t.payload) {
+            const obj = (t.payload as any)[this.key];
+            if (!obj) {
+              res.status(403).end('Payload must contain ' + this.key);
             } else {
-              res.locals[this.token] = payload;
-              const obj = (payload as any)[this.key];
-              if (!obj) {
-                res.status(403).end('Payload must contain ' + this.key);
+              if (exist<T>(obj as any, v)) {
+                next();
               } else {
-                if (exist<T>(obj as any, v)) {
-                  next();
-                } else {
-                  res.status(403).end('invalid ' + this.key);
-                }
+                res.status(403).end('invalid ' + this.key);
               }
             }
-          }).catch(err => {
-            const { status, body } = this.buildError(err);
-            res.status(status).end(body);
-          });
+          } else {
+            res.status(403).end('Payload cannot be undefined');
+          }
         }
-      } else {
-        res.status(401).end(`Require 'Authorization' in header`);
-      }
+      });
     };
   }
 }
 // tslint:disable-next-line:max-classes-per-file
 export class MultiAuthorizer<T, P> {
-  buildError: (err: any) => StatusError;
   user: string;
   key: string;
-  prefix: string;
   exact: boolean;
-  token: string;
-  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, public privilege: (userId: string, privilegeId: string) => Promise<number>, buildErr?: (err: any) => StatusError, key?: string, exact?: boolean, user?: string, prefix?: string, token?: string) {
+  getToken: GetToken<P>;
+  buildError: (err: any) => StatusError;
+  constructor(gt: GetToken<P>, public privilege: (userId: string, privilegeId: string) => Promise<number>, buildErr?: (err: any) => StatusError, key?: string, user?: string, exact?: boolean) {
+    this.getToken = gt;
     this.buildError = (buildErr ? buildErr : buildError);
-    this.prefix = (prefix ? prefix : 'Bearer ');
-    this.user = (user ? user : 'userId');
+    this.user = (user ? user : 'id');
     this.key = (key ? key : 'userType');
-    this.token = (token ? token : 'token');
     this.exact = (exact !== undefined ? exact : true);
     this.authorize = this.authorize.bind(this);
   }
   authorize(v: T[], privilege: string, action?: number): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
-      const data = req.headers['authorization'];
-      if (data) {
-        if (!data.startsWith(this.prefix)) {
-          res.status(401).end(`Authorization must start with '${this.prefix.trim()}'`);
-        } else {
-          const token = data.substr(this.prefix.length);
-          this.verify(token, this.secret).then(payload => {
-            if (payload === undefined) {
-              res.status(401).end('Payload cannot be undefined');
+      this.getToken(req, res).then(t => {
+        if (!t.end) {
+          if (t.payload) {
+            const obj = (t.payload as any)[this.key];
+            if (!obj) {
+              res.status(403).end('Payload must contain ' + this.key);
             } else {
-              res.locals[this.token] = payload;
-              const obj = (payload as any)[this.key];
-              if (!obj) {
-                res.status(403).end('Payload must contain ' + this.key);
-              } else {
-                if (!exist<T>(obj as any, v)) {
-                  res.status(403).end('invalid ' + this.key);
+              if (exist<T>(obj as any, v)) {
+                const userId = (t.payload as any)[this.user];
+                if (!userId) {
+                  res.status(403).end('Payload must contain ' + this.user);
                 } else {
-                  const userId = (payload as any)[this.user];
-                  if (!userId) {
-                    res.status(403).end('Payload must contain ' + this.user);
-                  } else {
-                    this.privilege(userId, privilege).then(p => {
-                      if (p === none) {
-                        res.status(403).end('no permission for ' + userId);
+                  this.privilege(userId, privilege).then(p => {
+                    if (p === none) {
+                      res.status(403).end('no permission for ' + userId);
+                    } else {
+                      if (!action) {
+                        next();
                       } else {
-                        if (!action) {
-                          next();
-                        } else {
-                          if (this.exact) {
-                            // tslint:disable-next-line:no-bitwise
-                            const sum = action & p;
-                            if (sum === action) {
-                              return next();
-                            } else {
-                              res.status(403).end('no permission');
-                            }
+                        if (this.exact) {
+                          // tslint:disable-next-line:no-bitwise
+                          const sum = action & p;
+                          if (sum === action) {
+                            return next();
                           } else {
-                            if (p >= action) {
-                              return next();
-                            } else {
-                              res.status(403).end('no permission');
-                            }
+                            res.status(403).end('no permission');
+                          }
+                        } else {
+                          if (p >= action) {
+                            return next();
+                          } else {
+                            res.status(403).end('no permission');
                           }
                         }
                       }
-                    }).catch(err => {
-                      const { status, body } = this.buildError(err);
-                      res.status(status).end(body);
-                    });
-                  }
+                    }
+                  }).catch(err => {
+                    const { status, body } = this.buildError(err);
+                    res.status(status).end(body);
+                  });
                 }
+              } else {
+                res.status(403).end('invalid ' + this.key);
               }
             }
-          }).catch(err => {
-            const { status, body } = this.buildError(err);
-            res.status(status).end(body);
-          });
+          } else {
+            res.status(401).end('Payload cannot be undefined');
+          }
         }
-      } else {
-        res.status(401).end(`Require 'Authorization' in header`);
-      }
+      });
     };
   }
 }
 // tslint:disable-next-line:max-classes-per-file
 export class Authorizer<P> {
-  buildError: (err: any) => StatusError;
   key: string;
-  prefix: string;
   exact: boolean;
-  token: string;
-  constructor(public secret: string, public verify: (token: string, secret: string) => Promise<P>, public privilege: (userId: string, privilegeId: string) => Promise<number>, buildErr?: (err: any) => StatusError, exact?: boolean, key?: string, prefix?: string, token?: string) {
+  getToken: GetToken<P>;
+  buildError: (err: any) => StatusError;
+  constructor(gt: GetToken<P>, public privilege: (userId: string, privilegeId: string) => Promise<number>, buildErr?: (err: any) => StatusError, exact?: boolean, key?: string) {
+    this.getToken = gt;
     this.buildError = (buildErr ? buildErr : buildError);
-    this.prefix = (prefix ? prefix : 'Bearer ');
-    this.key = (key ? key : 'userId');
-    this.token = (token ? token : 'token');
+    this.key = (key ? key : 'id');
     this.exact = (exact !== undefined ? exact : true);
     this.authorize = this.authorize.bind(this);
   }
   authorize(privilege: string, action?: number): Handle {
     return (req: Request, res: Response, next: NextFunction) => {
-      const data = req.headers['authorization'];
-      if (data) {
-        if (!data.startsWith(this.prefix)) {
-          res.status(401).end(`Authorization must start with '${this.prefix.trim()}'`);
-        } else {
-          const token = data.substr(this.prefix.length);
-          this.verify(token, this.secret).then(payload => {
-            if (payload === undefined) {
-              res.status(401).end('Payload cannot be undefined');
+      this.getToken(req, res).then(t => {
+        if (!t.end) {
+          const payload = t.payload;
+          if (payload === undefined) {
+            res.status(401).end('Payload cannot be undefined');
+          } else {
+            const userId = (payload as any)[this.key];
+            if (!userId) {
+              res.status(403).end('Payload must contain ' + this.key);
             } else {
-              res.locals[this.token] = payload;
-              const userId = (payload as any)[this.key];
-              if (!userId) {
-                res.status(403).end('Payload must contain ' + this.key);
-              } else {
-                this.privilege(userId, privilege).then(p => {
-                  if (p === none) {
-                    res.status(403).end('no permission for ' + userId);
+              this.privilege(userId, privilege).then(p => {
+                if (p === none) {
+                  res.status(403).end('no permission for ' + userId);
+                } else {
+                  if (!action) {
+                    next();
                   } else {
-                    if (!action) {
-                      next();
-                    } else {
-                      if (this.exact) {
-                        // tslint:disable-next-line:no-bitwise
-                        const sum = action & p;
-                        if (sum === action) {
-                          return next();
-                        } else {
-                          res.status(403).end('no permission');
-                        }
+                    if (this.exact) {
+                      // tslint:disable-next-line:no-bitwise
+                      const sum = action & p;
+                      if (sum === action) {
+                        return next();
                       } else {
-                        if (p >= action) {
-                          return next();
-                        } else {
-                          res.status(403).end('no permission');
-                        }
+                        res.status(403).end('no permission');
+                      }
+                    } else {
+                      if (p >= action) {
+                        return next();
+                      } else {
+                        res.status(403).end('no permission');
                       }
                     }
                   }
-                }).catch(err => {
-                  const { status, body } = this.buildError(err);
-                  res.status(status).end(body);
-                });
-              }
+                }
+              }).catch(err => {
+                const { status, body } = this.buildError(err);
+                res.status(status).end(body);
+              });
             }
-          }).catch(err => {
-            const { status, body } = this.buildError(err);
-            res.status(status).end(body);
-          });
+          }
         }
-      } else {
-        res.status(401).end(`Require 'Authorization' in header`);
-      }
+      });
     };
   }
 }
@@ -382,4 +418,40 @@ export function buildError(err: any): StatusError {
 }
 export function toString(err: any): string {
   return (typeof err === 'string' ? err : JSON.stringify(err));
+}
+
+export function get(app: Application, path: string, authorize: Handle, handle: Handle, secure?: boolean): void {
+  if (secure) {
+    app.get(path, authorize, handle);
+  } else {
+    app.get(path, handle);
+  }
+}
+export function post(app: Application, path: string, authorize: Handle, handle: Handle, secure?: boolean): void {
+  if (secure) {
+    app.post(path, authorize, handle);
+  } else {
+    app.post(path, handle);
+  }
+}
+export function put(app: Application, path: string, authorize: Handle, handle: Handle, secure?: boolean): void {
+  if (secure) {
+    app.put(path, authorize, handle);
+  } else {
+    app.put(path, handle);
+  }
+}
+export function patch(app: Application, path: string, authorize: Handle, handle: Handle, secure?: boolean): void {
+  if (secure) {
+    app.patch(path, authorize, handle);
+  } else {
+    app.patch(path, handle);
+  }
+}
+export function del(app: Application, path: string, authorize: Handle, handle: Handle, secure?: boolean): void {
+  if (secure) {
+    app.delete(path, authorize, handle);
+  } else {
+    app.delete(path, handle);
+  }
 }
