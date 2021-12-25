@@ -49,7 +49,6 @@ export function fromCookies(req: Request, name: string): StringToken {
     if (!token) {
       return { token: '', error: `Require '${name}' in cookies`};
     } else {
-      console.log('token cookie ' + token);
       return { token };
     }
   }
@@ -61,7 +60,6 @@ export function fromAuthorization(req: Request, prefix: string): StringToken {
         return { token: '', error: `Authorization must start with '${prefix.trim()}'`};
       } else {
         const token = data.substr(prefix.length);
-        console.log('Bearer token ' + token);
         return { token };
       }
     } else {
