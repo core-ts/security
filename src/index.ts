@@ -68,7 +68,7 @@ export function fromAuthorization(req: Request, prefix: string): StringToken {
     if (!data.startsWith(prefix)) {
       return { token: "", error: `Authorization must start with '${prefix.trim()}'` }
     } else {
-      const token = data.substr(prefix.length)
+      const token = data.substring(prefix.length)
       return { token }
     }
   } else {
@@ -366,7 +366,9 @@ export class MultiAuthorizer<T, P> {
 }
 // tslint:disable-next-line:max-classes-per-file
 export class Authorizer<P> {
-  key: string
+  payloadId: string
+  userId: string
+  permissions: string
   exact: boolean
   getToken: GetToken<P>
   buildError: (err: any) => StatusError
@@ -375,11 +377,15 @@ export class Authorizer<P> {
     public privilege: (userId: string, privilegeId: string) => Promise<number>,
     buildErr?: (err: any) => StatusError,
     exact?: boolean,
-    key?: string,
+    payloadId?: string,
+    userId?: string,
+    permissions?: string,
   ) {
     this.getToken = gt
     this.buildError = buildErr ? buildErr : buildError
-    this.key = key ? key : "id"
+    this.payloadId = payloadId ? payloadId : "id"
+    this.userId = userId ? userId : "userId"
+    this.permissions = permissions ? permissions : "permissions"
     this.exact = exact !== undefined ? exact : true
     this.authorize = this.authorize.bind(this)
   }
@@ -391,15 +397,17 @@ export class Authorizer<P> {
           if (payload === undefined) {
             res.status(401).end("Payload cannot be undefined")
           } else {
-            const userId = (payload as any)[this.key]
+            const userId = (payload as any)[this.payloadId]
             if (!userId) {
-              res.status(403).end("Payload must contain " + this.key)
+              res.status(403).end("Payload must contain " + this.payloadId)
             } else {
               this.privilege(userId, privilege)
                 .then((p) => {
                   if (p === none) {
                     res.status(403).end("no permission for " + userId)
                   } else {
+                    res.locals[this.userId] = userId
+                    res.locals[this.permissions] = p
                     if (!action) {
                       next()
                     } else {
